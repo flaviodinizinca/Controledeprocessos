@@ -1,7 +1,7 @@
 /**
  * SCRIPT DE DISTRIBUIÇÃO AUTOMÁTICA (DE/PARA)
  * Deve ser executado da Planilha de CONTROLE DE PROCESSOS.
- * A guia 'ToFor' deve estar nesta mesma planilha.
+ * Lógica atualizada: Define Saneamento pelo LOGIN do usuário, não apenas pelo marcador.
  */
 
 function executarDistribuicaoToFor() {
@@ -9,113 +9,131 @@ function executarDistribuicaoToFor() {
   
   // 1. ACESSAR DADOS DA 'TOFOR' LOCALMENTE
   const guiaToFor = ssControle.getSheetByName("ToFor");
-  
   if (!guiaToFor) {
-    SpreadsheetApp.getUi().alert("Erro: A guia 'ToFor' não foi encontrada nesta planilha.");
+    SpreadsheetApp.getUi().alert("Erro: A guia 'ToFor' não foi encontrada.");
     return;
   }
   
-  // Pega todos os dados da ToFor (Assume cabeçalho na linha 1)
   const dadosToFor = guiaToFor.getDataRange().getValues();
-  // Se só tiver cabeçalho, para.
   if (dadosToFor.length <= 1) {
-    SpreadsheetApp.getUi().alert("A guia 'ToFor' está vazia (apenas cabeçalho).");
+    SpreadsheetApp.getUi().alert("A guia 'ToFor' está vazia.");
     return;
   }
 
-  const linhasToFor = dadosToFor.slice(1); // Remove cabeçalho da matriz
+  const linhasToFor = dadosToFor.slice(1); 
 
-  // 2. CARREGAR MAPEAMENTO DE USUÁRIOS (User_SEI EXTERNO)
+  // 2. CONEXÃO COM A PLANILHA DE USUÁRIOS E CONFIGURAÇÕES
   const idPlanilhaUsuarios = "1s44YD2ozLAbBdGQbBE5iW7HcUzvQULZqd4ynYlV_HXA";
   let ssUsers;
   try {
     ssUsers = SpreadsheetApp.openById(idPlanilhaUsuarios);
   } catch (e) {
-    SpreadsheetApp.getUi().alert("Erro ao abrir planilha de Usuários (ID incorreto ou sem permissão).");
+    SpreadsheetApp.getUi().alert("Erro ao abrir planilha de Usuários/Configuração.");
     return;
   }
 
+  // A) Carregar Nomes (User_SEI)
   const guiaUsers = ssUsers.getSheetByName("User_SEI");
   const dadosUsers = guiaUsers.getDataRange().getValues();
-  const mapaUsuarios = {};
+  const mapaUsuarios = {}; // Login -> Nome Formatado
   
-  // Cria mapa: Login -> Nome Formatado
   for (let i = 1; i < dadosUsers.length; i++) {
-    const nomeCompleto = dadosUsers[i][0]; // Coluna A: Nome
-    const login = dadosUsers[i][1];        // Coluna B: Login
-    
-    if (login && nomeCompleto) {
-      // Pega o primeiro nome, capitaliza e remove espaços extras
-      const primeiroNome = nomeCompleto.split(" ")[0].trim();
-      const nomeFormatado = primeiroNome.charAt(0).toUpperCase() + primeiroNome.slice(1).toLowerCase();
-      mapaUsuarios[login] = nomeFormatado;
+    const nome = dadosUsers[i][0]; 
+    const login = dadosUsers[i][1];
+    if (login && nome) {
+      const pNome = nome.split(" ")[0].trim();
+      const formatado = pNome.charAt(0).toUpperCase() + pNome.slice(1).toLowerCase();
+      mapaUsuarios[login] = formatado;
     }
   }
 
-  // 3. PROCESSAR A DISTRIBUIÇÃO
+  // B) Carregar Lista de Saneadores (Config_Saneamento)
+  const guiaSaneadores = ssUsers.getSheetByName("Config_Saneamento");
+  let listaSaneadores = [];
+  
+  if (guiaSaneadores) {
+    const dadosSan = guiaSaneadores.getDataRange().getValues();
+    // Assume que os logins estão na Coluna A
+    for (let i = 1; i < dadosSan.length; i++) {
+      const loginSan = dadosSan[i][0]; // Coluna A
+      if (loginSan) {
+        listaSaneadores.push(String(loginSan).trim());
+      }
+    }
+  } else {
+    SpreadsheetApp.getUi().alert("Aviso: Guia 'Config_Saneamento' não encontrada na planilha de usuários.");
+  }
+
+  // 3. PROCESSAR DISTRIBUIÇÃO
   let criados = 0;
   let distribuidos = 0;
-  let erros = 0;
+  let saneamentoCount = 0;
 
   linhasToFor.forEach(linha => {
-    // Mapeamento das colunas da ToFor
-    // A=Processo, B=Usuario, C=Marcador, D=Especificação
-    const numProcesso = linha[0];    
+    const processo = linha[0];    
     const usuarioLogin = linha[1];   
-    const marcador = linha[2];       
+    const marcador = linha[2]; // Mantemos apenas para registro se for comprador
     const especificacao = linha[3];  
 
-    if (numProcesso && usuarioLogin) {
-      // Busca o nome da guia pelo login
-      const nomeGuia = mapaUsuarios[usuarioLogin];
+    if (processo && usuarioLogin) {
+      const nomeBase = mapaUsuarios[usuarioLogin];
 
-      if (nomeGuia) {
-        let abaComprador = ssControle.getSheetByName(nomeGuia);
+      if (nomeBase) {
+        let nomeAbaFinal = nomeBase;
+        
+        // --- NOVA LÓGICA DE DECISÃO ---
+        // Verifica se o LOGIN está na lista de saneadores
+        let isSaneamento = listaSaneadores.includes(String(usuarioLogin).trim());
+        
+        let novaLinha = [];
 
-        // Se a aba não existe, cria e CONFIGURA usando a função do 02_Guias.gs
-        if (!abaComprador) {
-          abaComprador = ssControle.insertSheet(nomeGuia);
+        if (isSaneamento) {
+          // É Saneador: Força estrutura de Saneamento
+          nomeAbaFinal = nomeBase + " (Saneamento)";
+          saneamentoCount++;
           
-          // Verifica se a função de configuração existe antes de chamar
-          if (typeof configurarEstruturaGuia === 'function') {
-            configurarEstruturaGuia(abaComprador, ssControle);
-            criados++;
-          }
+          novaLinha = [
+            processo,           // A: Processo
+            new Date(),         // B: Data Chegada (Hoje)
+            "",                 // C: Protocolo
+            "",                 // D: Parecer
+            especificacao,      // E: Objeto (Vem da Especificação)
+            "",                 // F: Célula
+            "",                 // G: Modalidade
+            "",                 // H: Data Status
+            "NÃO",              // I: Encerrado?
+            "",                 // J: Localização
+            "A Iniciar"         // K: Status
+          ];
+        } else {
+          // Não é Saneador: Estrutura Padrão de Comprador
+          novaLinha = [
+            processo,      // A
+            marcador,      // B (Usa o que vier no SEI, ou vazio)
+            especificacao  // C
+          ];
         }
 
-        // Prepara a linha para inserção seguindo a estrutura do 02_Guias
-        // Coluna A: Processo
-        // Coluna B: Marcador (NOVO)
-        // Coluna C: Especificação (DESLOCADO)
-        // Coluna D em diante: Vazio
-        const novaLinha = [
-          numProcesso,   // A
-          marcador,      // B
-          especificacao  // C
-        ];
+        // --- CRIAÇÃO/OBTENÇÃO DA ABA ---
+        let abaDestino = ssControle.getSheetByName(nomeAbaFinal);
+        
+        if (!abaDestino) {
+          // Cria usando a função do 02_Guias
+          abaDestino = criarGuiaComprador(nomeAbaFinal, isSaneamento ? "SANEAMENTO" : "PADRAO");
+          criados++;
+        }
 
-        // Adiciona na próxima linha vazia
-        abaComprador.appendRow(novaLinha);
+        // --- INSERÇÃO ---
+        abaDestino.appendRow(novaLinha);
         distribuidos++;
-      } else {
-        // Login não encontrado no mapa
-        console.log(`Login não encontrado: ${usuarioLogin}`);
-        erros++;
       }
     }
   });
 
   SpreadsheetApp.getUi().alert(
-    `Distribuição Concluída!\n\n` +
-    `🆕 Guias Criadas: ${criados}\n` +
-    `📝 Processos Distribuídos: ${distribuidos}\n` +
-    `⚠️ Logins não encontrados: ${erros}`
+    `Distribuição Concluída!\n\n` + 
+    `🆕 Abas Criadas: ${criados}\n` + 
+    `📝 Total Processos: ${distribuidos}\n` + 
+    `🛠️ Identificados como Saneamento: ${saneamentoCount}`
   );
-}
-
-function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-  ui.createMenu('⚙️ Configuração')
-    .addItem('Executar Distribuição ToFor', 'executarDistribuicaoToFor')
-    .addToUi();
 }
